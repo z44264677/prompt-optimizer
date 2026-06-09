@@ -1,0 +1,21 @@
+{
+  "plugin": {
+    "name": "prompt-optimizer-spend-control",
+    "version": "0.2.0",
+    "enabled": true
+  },
+  "suppressor": {
+    "bash": { "enabled": true, "maxChars": 15000, "headChars": 6000, "tailChars": 1500 },
+    "read": { "enabled": true, "maxChars": 6000, "mode": "warn" },
+    "websearch": { "enabled": true, "chainThreshold": 3, "overlapThreshold": 0.3 },
+    "verbose": { "enabled": false, "windowSize": 20, "threshold": 800 }
+  },
+  "budget": {
+    "enabled": true,
+    "softCapUsd": 1.0,
+    "hardCapUsd": 5.0,
+    "perSessionCapUsd": 10.0,
+    "perDayCapUsd": 50.0
+  },
+  "excludes": []
+}

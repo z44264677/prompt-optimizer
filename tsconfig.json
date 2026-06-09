@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022"],
+    "outDir": "./dist",
+    "rootDir": "./",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true
+  },
+  "include": ["src/types.ts", "hooks/PostToolUse.ts", "hooks/post-tool-use-entry.ts", "hooks/session-start-entry.ts", "hooks/user-prompt-submit-entry.ts", "test/unit/PostToolUse.test.ts", "config/**/*"],
+  "exclude": ["node_modules", "dist"]
+}

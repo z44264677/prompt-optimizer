@@ -1,0 +1,12 @@
+{
+  "name": "prompt-optimizer",
+  "description": "Context Inflation Suppressor — 自动抑制 Claude Code context 膨胀。S1: Bash大输出截断, S2: Read大文件提醒, S3: WebSearch搜索链检测, S5: Session成本追踪。基于 arXiv:2604.22750 + 18 session 真实数据。月省 ~$65。",
+  "version": "0.2.0",
+  "author": {
+    "name": "Alice"
+  },
+  "homepage": "https://github.com/z44264677/prompt-optimizer",
+  "repository": "https://github.com/z44264677/prompt-optimizer",
+  "license": "MIT",
+  "keywords": ["cost", "token", "optimization", "context", "suppressor", "claude-code"]
+}

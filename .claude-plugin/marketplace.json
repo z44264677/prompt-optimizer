@@ -1,0 +1,23 @@
+{
+  "name": "prompt-optimizer",
+  "owner": {
+    "name": "Alice"
+  },
+  "metadata": {
+    "description": "Context Inflation Suppressor — 自动抑制 Claude Code context 膨胀，月省 ~$65",
+    "version": "0.2.0"
+  },
+  "plugins": [
+    {
+      "name": "prompt-optimizer",
+      "source": "./",
+      "description": "S1 Bash大输出截断 + S2 Read大文件提醒 + S3 WebSearch搜索链检测 + S4 啰嗦检测(可选) + S5 Session成本追踪。纯规则零LLM调用，基于 arXiv:2604.22750 + 18 session 真实数据验证。",
+      "version": "0.2.0",
+      "author": { "name": "Alice" },
+      "category": "cost-optimization",
+      "tags": ["cost", "token", "optimization", "context", "suppressor"],
+      "homepage": "https://github.com/z44264677/prompt-optimizer",
+      "repository": "https://github.com/z44264677/prompt-optimizer"
+    }
+  ]
+}
