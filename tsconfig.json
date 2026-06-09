@@ -15,6 +15,6 @@
     "declarationMap": true,
     "sourceMap": true
   },
-  "include": ["src/types.ts", "hooks/PostToolUse.ts", "hooks/post-tool-use-entry.ts", "hooks/session-start-entry.ts", "hooks/user-prompt-submit-entry.ts", "test/unit/PostToolUse.test.ts", "config/**/*"],
-  "exclude": ["node_modules", "dist"]
+  "include": ["src/types.ts", "hooks/PostToolUse.ts", "hooks/post-tool-use-entry.ts", "hooks/session-start-entry.ts", "hooks/user-prompt-submit-entry.ts", "config/**/*"],
+  "exclude": ["node_modules", "dist", "test", "src/budget-governor", "src/cache", "src/cost-estimator", "src/degrade", "src/direct-responder", "src/metrics", "src/model-client.ts", "src/policy", "src/router"]
 }

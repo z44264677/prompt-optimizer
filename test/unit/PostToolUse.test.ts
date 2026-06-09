@@ -18,6 +18,7 @@ function makeCtx(overrides: Partial<PostToolUseContext>): PostToolUseContext {
 }
 
 beforeEach(() => {
+  // Clean up file-persisted state
   resetSession(SESSION_ID);
 });
 

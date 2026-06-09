@@ -1,24 +1,58 @@
 // PostToolUse Hook — Context Inflation Suppressor
 // S1: Bash output truncation (head+tail)
 // S2: Read offset/limit reminder (warn-only)
-// S3: WebSearch chain summarization
+// S3: WebSearch chain summarization (file-persisted across invocations)
+// S5: Session cost tracking (file-persisted across invocations)
 //
 // Based on 22-argument validation of 18 sessions × 7 models.
 // Theoretical basis: arXiv:2604.22750 §7.2 "budget-aware tool-use policies"
 
 import type { SuppressorConfig } from '../src/types.js';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync } from 'fs';
+import { join } from 'path';
 
-// === Session State ===
+// === File-based Session State ===
 
-interface SearchEntry {
-  topic: string;
-  keywords: Set<string>;
-  count: number;
-  findings: string[];
-  firstRound: number;
+const STATE_DIR = join(process.env.HOME || '/tmp', '.claude', 'plugins', 'cache', 'prompt-optimizer', 'state');
+
+function ensureStateDir(): void {
+  if (!existsSync(STATE_DIR)) {
+    mkdirSync(STATE_DIR, { recursive: true });
+  }
 }
 
-const searchHistory: Map<string, SearchEntry[]> = new Map(); // sessionId → entries
+interface SessionState {
+  searchHistory: Array<{
+    topic: string;
+    keywords: string[];
+    count: number;
+    findings: string[];
+    firstRound: number;
+  }>;
+  costTracker: {
+    totalInputTokens: number;
+    totalOutputTokens: number;
+    rounds: number;
+    lastAlertThreshold: number;
+    pricePerM: number;
+  } | null;
+}
+
+function loadState(sessionId: string): SessionState {
+  ensureStateDir();
+  const path = join(STATE_DIR, `${sessionId}.json`);
+  try {
+    return JSON.parse(readFileSync(path, 'utf-8'));
+  } catch {
+    return { searchHistory: [], costTracker: null };
+  }
+}
+
+function saveState(sessionId: string, state: SessionState): void {
+  ensureStateDir();
+  const path = join(STATE_DIR, `${sessionId}.json`);
+  writeFileSync(path, JSON.stringify(state));
+}
 
 // === S1: Bash Output Truncation ===
 
@@ -108,6 +142,7 @@ function extractSearchSummary(content: string, maxItems: number): string {
 
 /**
  * Check for search chains and generate summary injection.
+ * Uses file-persisted state (Claude Code spawns a new process per hook call).
  */
 function checkSearchChain(
   sessionId: string,
@@ -115,10 +150,8 @@ function checkSearchChain(
   content: string,
   config: SuppressorConfig['websearch'],
 ): string | null {
-  if (!searchHistory.has(sessionId)) {
-    searchHistory.set(sessionId, []);
-  }
-  const history = searchHistory.get(sessionId)!;
+  const state = loadState(sessionId);
+  const history = state.searchHistory;
 
   const keywords = extractKeywords(input);
   if (keywords.length === 0) return null;
@@ -126,9 +159,9 @@ function checkSearchChain(
   const keywordSet = new Set(keywords);
 
   // Find matching topic
-  let matchedEntry: SearchEntry | null = null;
+  let matchedEntry: typeof history[0] | null = null;
   for (const entry of history) {
-    if (keywordOverlap(keywordSet, entry.keywords) >= config.overlapThreshold) {
+    if (keywordOverlap(keywordSet, new Set(entry.keywords)) >= config.overlapThreshold) {
       matchedEntry = entry;
       break;
     }
@@ -144,13 +177,16 @@ function checkSearchChain(
     const summary = extractSearchSummary(content, 3);
     history.push({
       topic: keywords.join(' '),
-      keywords: keywordSet,
+      keywords: [...keywordSet],
       count: 1,
       findings: summary ? [summary] : [],
       firstRound: 0,
     });
+    saveState(sessionId, state);
     return null;
   }
+
+  saveState(sessionId, state);
 
   // Trigger chain warning at threshold
   if (matchedEntry.count >= config.chainThreshold) {
@@ -164,6 +200,7 @@ function checkSearchChain(
 
     // Reset count to avoid repeated warnings
     matchedEntry.count = 0;
+    saveState(sessionId, state);
 
     return warning;
   }
@@ -234,33 +271,19 @@ export function onPostToolUse(ctx: PostToolUseContext, config: SuppressorConfig)
 
 /**
  * Reset session state (call on SessionStart).
+ * Deletes persisted state file.
  */
 export function resetSession(sessionId: string): void {
-  searchHistory.delete(sessionId);
-  costTrackers.delete(sessionId);
+  const path = join(STATE_DIR, `${sessionId}.json`);
+  try { unlinkSync(path); } catch { /* file doesn't exist */ }
 }
 
-// === S5: Session Cost Tracker ===
-
-interface CostTracker {
-  totalInputTokens: number;
-  totalOutputTokens: number;
-  rounds: number;
-  lastAlertThreshold: number;
-  pricePerM: number;
-}
-
-const costTrackers: Map<string, CostTracker> = new Map();
+// === S5: Session Cost Tracker (file-persisted) ===
 
 const MODEL_PRICES: Record<string, number> = {
-  'claude-opus-4-6': 1.50,
-  'claude-sonnet-4-6': 0.30,
-  'deepseek-v4-pro': 0.14,
-  'MiniMax-M3': 2.0,
-  'MiniMax-M2.7': 2.0,
-  'kimi-k2.6': 2.0,
-  'doubao-seed-2.0-code': 1.0,
-  'glm-5.1': 1.0,
+  'claude-opus-4-6': 1.50, 'claude-sonnet-4-6': 0.30,
+  'deepseek-v4-pro': 0.14, 'MiniMax-M3': 2.0, 'MiniMax-M2.7': 2.0,
+  'kimi-k2.6': 2.0, 'doubao-seed-2.0-code': 1.0, 'glm-5.1': 1.0,
 };
 
 export function trackSessionCost(
@@ -270,22 +293,27 @@ export function trackSessionCost(
   outputTokens: number,
   thresholdsUsd: number[],
 ): string | null {
-  if (!costTrackers.has(sessionId)) {
-    costTrackers.set(sessionId, {
+  const state = loadState(sessionId);
+  let t = state.costTracker;
+  if (!t) {
+    t = {
       totalInputTokens: 0, totalOutputTokens: 0,
       rounds: 0, lastAlertThreshold: 0,
       pricePerM: MODEL_PRICES[model] ?? 2.0,
-    });
+    };
   }
-  const t = costTrackers.get(sessionId)!;
   t.totalInputTokens += inputTokens;
   t.totalOutputTokens += outputTokens;
   t.rounds++;
+  state.costTracker = t;
+  saveState(sessionId, state);
 
   const estimatedCost = (t.totalInputTokens * t.pricePerM) / 1_000_000;
   for (const threshold of thresholdsUsd) {
     if (estimatedCost >= threshold && t.lastAlertThreshold < threshold && t.rounds > 20) {
       t.lastAlertThreshold = Math.floor(threshold);
+      state.costTracker = t;
+      saveState(sessionId, state);
       return `[成本提醒] 已 ${t.rounds} 轮, 估算 ~$${estimatedCost.toFixed(2)}。` +
         (threshold >= 5 ? ' 任务完成后建议新开 session。' : '');
     }
