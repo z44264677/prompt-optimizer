@@ -8,7 +8,8 @@
     "bash": { "enabled": true, "maxChars": 15000, "headChars": 6000, "tailChars": 1500 },
     "read": { "enabled": true, "maxChars": 6000, "mode": "warn" },
     "websearch": { "enabled": true, "chainThreshold": 3, "overlapThreshold": 0.3 },
-    "verbose": { "enabled": false, "windowSize": 20, "threshold": 800 }
+    "verbose": { "enabled": false, "windowSize": 20, "threshold": 800 },
+    "costAlert": { "enabled": true, "thresholdsUsd": [0.5, 1, 2, 5, 10, 20, 50] }
   },
   "budget": {
     "enabled": true,

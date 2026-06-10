@@ -1,10 +1,15 @@
 // Tests for PostToolUse Hook — Context Inflation Suppressor
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterAll } from 'vitest';
 import { onPostToolUse, resetSession, type PostToolUseContext } from '../../hooks/PostToolUse';
 import { DEFAULT_SUPPRESSOR_CONFIG, type SuppressorConfig } from '../../src/types';
 
 const SESSION_ID = 'test-session';
 const config: SuppressorConfig = { ...DEFAULT_SUPPRESSOR_CONFIG };
+
+afterAll(() => {
+  // Final cleanup: ensure test-session state file is removed
+  resetSession(SESSION_ID);
+});
 
 function makeCtx(overrides: Partial<PostToolUseContext>): PostToolUseContext {
   return {

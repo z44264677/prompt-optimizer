@@ -21,6 +21,20 @@ function ensureStateDir(): void {
   }
 }
 
+interface SuppressionStats {
+  /** S1: Bash truncation — chars trimmed & estimated token savings */
+  bashTruncations: number;
+  bashCharsBefore: number;
+  bashCharsAfter: number;
+  /** S2: Read reminders — count only (savings depend on user action) */
+  readReminders: number;
+  /** S3: WebSearch chain warnings triggered */
+  searchChainWarnings: number;
+  searchSearchesPrevented: number; // estimated searches avoided after warning
+  /** S5: cost alerts triggered */
+  costAlerts: number;
+}
+
 interface SessionState {
   searchHistory: Array<{
     topic: string;
@@ -28,6 +42,7 @@ interface SessionState {
     count: number;
     findings: string[];
     firstRound: number;
+    triggeredCount: number;
   }>;
   costTracker: {
     totalInputTokens: number;
@@ -36,6 +51,7 @@ interface SessionState {
     lastAlertThreshold: number;
     pricePerM: number;
   } | null;
+  suppressionStats: SuppressionStats;
 }
 
 function loadState(sessionId: string): SessionState {
@@ -44,7 +60,7 @@ function loadState(sessionId: string): SessionState {
   try {
     return JSON.parse(readFileSync(path, 'utf-8'));
   } catch {
-    return { searchHistory: [], costTracker: null };
+    return { searchHistory: [], costTracker: null, suppressionStats: { bashTruncations: 0, bashCharsBefore: 0, bashCharsAfter: 0, readReminders: 0, searchChainWarnings: 0, searchSearchesPrevented: 0, costAlerts: 0 } };
   }
 }
 
@@ -145,12 +161,12 @@ function extractSearchSummary(content: string, maxItems: number): string {
  * Uses file-persisted state (Claude Code spawns a new process per hook call).
  */
 function checkSearchChain(
+  state: SessionState,
   sessionId: string,
   input: Record<string, unknown>,
   content: string,
   config: SuppressorConfig['websearch'],
 ): string | null {
-  const state = loadState(sessionId);
   const history = state.searchHistory;
 
   const keywords = extractKeywords(input);
@@ -173,6 +189,8 @@ function checkSearchChain(
     if (summary) {
       matchedEntry.findings.push(summary);
     }
+    // Save state for existing entries too (so count persists across hook invocations)
+    saveState(sessionId, state);
   } else {
     const summary = extractSearchSummary(content, 3);
     history.push({
@@ -181,26 +199,26 @@ function checkSearchChain(
       count: 1,
       findings: summary ? [summary] : [],
       firstRound: 0,
+      triggeredCount: 0,
     });
     saveState(sessionId, state);
     return null;
   }
 
-  saveState(sessionId, state);
-
   // Trigger chain warning at threshold
   if (matchedEntry.count >= config.chainThreshold) {
     const allFindings = matchedEntry.findings.slice(-5).join('\n');
+    const totalSearches = matchedEntry.count + (matchedEntry.triggeredCount || 0);
     const warning = [
-      `\n[搜索链检测] 你已就 "${matchedEntry.topic}" 搜索了 ${matchedEntry.count} 次。`,
+      `\n[搜索链检测] 你已就 "${matchedEntry.topic}" 搜索了 ${totalSearches} 次。`,
       '主要发现：',
       allFindings || '(无有效结果)',
       '建议：直接 Read 相关文件获取精确信息，而非继续搜索。',
     ].join('\n');
 
-    // Reset count to avoid repeated warnings
+    // Track trigger history, then reset count to avoid repeated warnings
+    matchedEntry.triggeredCount = totalSearches;
     matchedEntry.count = 0;
-    saveState(sessionId, state);
 
     return warning;
   }
@@ -235,11 +253,19 @@ export function onPostToolUse(ctx: PostToolUseContext, config: SuppressorConfig)
   const result: PostToolUseResult = {};
   const injections: string[] = [];
 
+  // Load state for stats tracking
+  const state = loadState(ctx.sessionId);
+  const ss = state.suppressionStats;
+
   // === S1: Bash truncation ===
   if (config.bash.enabled && ctx.toolName === 'Bash' && !ctx.isError) {
     const truncated = truncateBashOutput(ctx.toolResult, config.bash);
     if (truncated) {
       result.content = truncated;
+      ss.bashTruncations++;
+      ss.bashCharsBefore += ctx.toolResult.length;
+      ss.bashCharsAfter += truncated.length;
+      saveState(ctx.sessionId, state);
     }
   }
 
@@ -249,6 +275,8 @@ export function onPostToolUse(ctx: PostToolUseContext, config: SuppressorConfig)
     const reminder = generateReadReminder(filePath, ctx.toolResult, config.read);
     if (reminder) {
       injections.push(reminder);
+      ss.readReminders++;
+      saveState(ctx.sessionId, state);
     }
   }
 
@@ -256,9 +284,13 @@ export function onPostToolUse(ctx: PostToolUseContext, config: SuppressorConfig)
   if (config.websearch.enabled &&
       (ctx.toolName === 'WebSearch' || ctx.toolName === 'WebFetch' ||
        ctx.toolName === 'mcp__MiniMax__web_search')) {
-    const chainWarning = checkSearchChain(ctx.sessionId, ctx.toolInput, ctx.toolResult, config.websearch);
+    const chainWarning = checkSearchChain(state, ctx.sessionId, ctx.toolInput, ctx.toolResult, config.websearch);
     if (chainWarning) {
       injections.push(chainWarning);
+      ss.searchChainWarnings++;
+      // Estimate prevented searches: after warning, user typically stops that topic (saves ~3 searches = ~15K tokens)
+      ss.searchSearchesPrevented += 3;
+      saveState(ctx.sessionId, state);
     }
   }
 
@@ -270,12 +302,28 @@ export function onPostToolUse(ctx: PostToolUseContext, config: SuppressorConfig)
 }
 
 /**
- * Reset session state (call on SessionStart).
- * Deletes persisted state file.
+ * Reset session state (call on SessionStart in tests).
+ * Only deletes — loadState returns defaults when file doesn't exist.
  */
 export function resetSession(sessionId: string): void {
   const path = join(STATE_DIR, `${sessionId}.json`);
-  try { unlinkSync(path); } catch { /* file doesn't exist */ }
+  try { unlinkSync(path); } catch { /* doesn't exist */ }
+}
+
+/**
+ * Initialize a fresh session state (call on real SessionStart).
+ * Creates the state file so viewer can see it immediately.
+ */
+export function initSession(sessionId: string): void {
+  // Delete old state first
+  const path = join(STATE_DIR, `${sessionId}.json`);
+  try { unlinkSync(path); } catch { /* doesn't exist */ }
+  // Create fresh state
+  saveState(sessionId, {
+    searchHistory: [],
+    costTracker: null,
+    suppressionStats: { bashTruncations: 0, bashCharsBefore: 0, bashCharsAfter: 0, readReminders: 0, searchChainWarnings: 0, searchSearchesPrevented: 0, costAlerts: 0 },
+  });
 }
 
 // === S5: Session Cost Tracker (file-persisted) ===
@@ -301,19 +349,18 @@ export function trackSessionCost(
       rounds: 0, lastAlertThreshold: 0,
       pricePerM: MODEL_PRICES[model] ?? 2.0,
     };
+    state.costTracker = t;
   }
   t.totalInputTokens += inputTokens;
   t.totalOutputTokens += outputTokens;
   t.rounds++;
-  state.costTracker = t;
   saveState(sessionId, state);
 
   const estimatedCost = (t.totalInputTokens * t.pricePerM) / 1_000_000;
   for (const threshold of thresholdsUsd) {
     if (estimatedCost >= threshold && t.lastAlertThreshold < threshold && t.rounds > 20) {
       t.lastAlertThreshold = Math.floor(threshold);
-      state.costTracker = t;
-      saveState(sessionId, state);
+      state.suppressionStats.costAlerts++;
       return `[成本提醒] 已 ${t.rounds} 轮, 估算 ~$${estimatedCost.toFixed(2)}。` +
         (threshold >= 5 ? ' 任务完成后建议新开 session。' : '');
     }

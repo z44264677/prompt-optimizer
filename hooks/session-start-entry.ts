@@ -2,14 +2,14 @@
  * SessionStart Hook Entry Point
  *
  * Claude Code calls this script at the start of each session.
- * Resets session-level state (WebSearch history).
+ * Initializes fresh session state for tracking.
  *
  * Protocol:
  *   stdin:  { session_id: string }
  *   stdout: {} (no action needed)
  */
 
-import { resetSession } from './PostToolUse.js';
+import { initSession } from './PostToolUse.js';
 
 async function main(): Promise<void> {
   const chunks: Buffer[] = [];
@@ -20,9 +20,8 @@ async function main(): Promise<void> {
 
   try {
     const input = JSON.parse(raw);
-    if (input.session_id) {
-      resetSession(input.session_id);
-    }
+    const sessionId = input.session_id || 'default';
+    initSession(sessionId);
   } catch {
     // Ignore parse errors
   }
