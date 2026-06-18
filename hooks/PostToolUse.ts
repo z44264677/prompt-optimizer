@@ -80,7 +80,7 @@ function truncateBashOutput(
   const tail = content.slice(-config.tailChars);
   const dropped = content.length - config.headChars - config.tailChars;
 
-  return `${head}\n\n[... ${dropped.toLocaleString()} chars truncated ...]\n\n${tail}`;
+  return `${head}\n\n[... ${dropped.toLocaleString('en-US')} chars truncated ...]\n\n${tail}`;
 }
 
 // === S2: Read Offset/Limit Reminder ===
