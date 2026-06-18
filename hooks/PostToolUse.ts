@@ -44,6 +44,8 @@ interface SessionState {
   }>;
   /** Total tool calls in this session. Used by S4 (verbose detection). */
   roundCount: number;
+  /** S4 verbose reminders triggered. Written by UserPromptSubmit, read-only here. */
+  verboseReminders?: number;
   suppressionStats: SuppressionStats;
 }
 
@@ -60,7 +62,11 @@ function loadState(sessionId: string): SessionState {
 function saveState(sessionId: string, state: SessionState): void {
   ensureStateDir();
   const path = join(STATE_DIR, `${sessionId}.json`);
-  writeFileSync(path, JSON.stringify(state));
+  // Merge with existing file — UserPromptSubmit may have written fields
+  // (verboseReminders) that PostToolUse doesn't track in its SessionState.
+  let existing: Record<string, unknown> = {};
+  try { existing = JSON.parse(readFileSync(path, 'utf-8')); } catch { /* new file */ }
+  writeFileSync(path, JSON.stringify({ ...existing, ...state }));
 }
 
 // === S1: Bash Output Truncation ===
@@ -88,17 +94,15 @@ function truncateBashOutput(
 /**
  * Generate a reminder for large file reads.
  */
-function generateReadReminder(
+function getReadFileInfo(
   filePath: string,
   content: string,
   config: SuppressorConfig['read'],
 ): string | null {
   if (content.length <= config.maxChars) return null;
-
   const lines = content.split('\n').length;
   const sizeKB = Math.round(content.length / 1024);
-
-  return `[Read: ${sizeKB}KB, ~${lines} lines. Use offset/limit for partial reads.]`;
+  return `${sizeKB}KB, ~${lines} lines`;
 }
 
 // === S3: WebSearch Chain Detection ===
@@ -196,8 +200,8 @@ function checkSearchChain(
   if (matchedEntry.count >= config.chainThreshold) {
     const totalSearches = matchedEntry.count + (matchedEntry.triggeredCount || 0);
     const warning =
-      `[Search chain: "${matchedEntry.topic}" searched ${totalSearches}x. ` +
-      'Prefer Read/grep over repeated searches.]';
+      `Search chain: "${matchedEntry.topic}" searched ${totalSearches}x. ` +
+      'Prefer Read/grep over repeated searches.';
 
     // Track trigger history, then reset count to avoid repeated warnings
     matchedEntry.triggeredCount = totalSearches;
@@ -259,8 +263,15 @@ export function onPostToolUse(ctx: PostToolUseContext, config: SuppressorConfig)
     const filePath = String(ctx.toolInput?.file_path || ctx.toolInput?.filePath || '');
     const reminder = generateReadReminder(filePath, ctx.toolResult, config.read);
     if (reminder) {
-      injections.push(reminder);
       ss.readReminders++;
+      const count = ss.readReminders;
+      if (config.escalation.enabled && count >= config.escalation.blockAt) {
+        result.suppress = true;
+      } else if (config.escalation.enabled && count >= config.escalation.warnAt) {
+        injections.push(`[Read: ${reminder} (${count}x this session. Use offset/limit or codegraph.)]`);
+      } else {
+        injections.push(`[${reminder}]`);
+      }
     }
   }
 
@@ -270,9 +281,17 @@ export function onPostToolUse(ctx: PostToolUseContext, config: SuppressorConfig)
        ctx.toolName === 'mcp__MiniMax__web_search')) {
     const chainWarning = checkSearchChain(state, ctx.sessionId, ctx.toolInput, ctx.toolResult, config.websearch);
     if (chainWarning) {
-      injections.push(chainWarning);
       ss.searchChainWarnings++;
       ss.searchSearchesPrevented += 3;
+      const count = ss.searchChainWarnings;
+      if (config.escalation.enabled && count >= config.escalation.blockAt) {
+        result.suppress = true;
+        injections.push(`[Search blocked: ${chainWarning} (${count}x this session.)]`);
+      } else if (config.escalation.enabled && count >= config.escalation.warnAt) {
+        injections.push(`[${chainWarning} (${count}x this session. Stop searching.)]`);
+      } else {
+        injections.push(`[${chainWarning}]`);
+      }
     }
   }
 
