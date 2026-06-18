@@ -344,10 +344,21 @@ export function trackSessionCost(
   const state = loadState(sessionId);
   let t = state.costTracker;
   if (!t) {
+    const pricePerM = MODEL_PRICES[model] || null;
+    if (!pricePerM) {
+      // Unknown model — track tokens but skip cost alerts to avoid false positives
+      t = { totalInputTokens: 0, totalOutputTokens: 0, rounds: 0, lastAlertThreshold: 0, pricePerM: 0 };
+      state.costTracker = t;
+      t.totalInputTokens += inputTokens;
+      t.totalOutputTokens += outputTokens;
+      t.rounds++;
+      saveState(sessionId, state);
+      return null;
+    }
     t = {
       totalInputTokens: 0, totalOutputTokens: 0,
       rounds: 0, lastAlertThreshold: 0,
-      pricePerM: MODEL_PRICES[model] ?? 2.0,
+      pricePerM,
     };
     state.costTracker = t;
   }
@@ -356,11 +367,14 @@ export function trackSessionCost(
   t.rounds++;
   saveState(sessionId, state);
 
+  if (t.pricePerM === 0) return null;
+
   const estimatedCost = (t.totalInputTokens * t.pricePerM) / 1_000_000;
   for (const threshold of thresholdsUsd) {
     if (estimatedCost >= threshold && t.lastAlertThreshold < threshold && t.rounds > 20) {
-      t.lastAlertThreshold = Math.floor(threshold);
+      t.lastAlertThreshold = threshold;
       state.suppressionStats.costAlerts++;
+      saveState(sessionId, state);
       return `[成本提醒] 已 ${t.rounds} 轮, 估算 ~$${estimatedCost.toFixed(2)}。` +
         (threshold >= 5 ? ' 任务完成后建议新开 session。' : '');
     }

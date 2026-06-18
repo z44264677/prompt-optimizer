@@ -1,6 +1,6 @@
 // Tests for PostToolUse Hook — Context Inflation Suppressor
 import { describe, it, expect, beforeEach, afterAll } from 'vitest';
-import { onPostToolUse, resetSession, type PostToolUseContext } from '../../hooks/PostToolUse';
+import { onPostToolUse, resetSession, trackSessionCost, type PostToolUseContext } from '../../hooks/PostToolUse';
 import { DEFAULT_SUPPRESSOR_CONFIG, type SuppressorConfig } from '../../src/types';
 
 const SESSION_ID = 'test-session';
@@ -268,5 +268,98 @@ describe('Session Reset', () => {
       );
       expect(result.injection).toBeUndefined();
     }
+  });
+});
+
+// === S5: Session Cost Tracking ===
+
+describe('S5: Session Cost Tracking', () => {
+  const thresholds = [0.5, 1, 2, 5];
+
+  beforeEach(() => {
+    resetSession(SESSION_ID);
+  });
+
+  it('returns null when cost is below threshold', () => {
+    const result = trackSessionCost(SESSION_ID, 'deepseek-v4-pro', 1000, 500, thresholds);
+    expect(result).toBeNull();
+  });
+
+  it('returns null for unknown model (pricePerM = 0, no false alerts)', () => {
+    // Unknown model should not produce alerts regardless of token count
+    for (let i = 0; i < 30; i++) {
+      const result = trackSessionCost(SESSION_ID, '', 100_000, 50_000, thresholds);
+      expect(result).toBeNull();
+    }
+  });
+
+  it('returns null when rounds <= 20 even if cost exceeds threshold', () => {
+    // deepseek-v4-pro @ $0.14/M — need ~3.6M tokens to hit $0.5
+    // But with only 20 rounds, should not alert
+    for (let i = 0; i < 20; i++) {
+      const result = trackSessionCost(SESSION_ID, 'deepseek-v4-pro', 200_000, 100_000, thresholds);
+      expect(result).toBeNull();
+    }
+  });
+
+  it('triggers alert at threshold when rounds > 20 and cost exceeds', () => {
+    // claude-opus-4-6 @ $1.50/M — 400K tokens per round × 21 rounds = 8.4M tokens = $12.6
+    // Should trigger $0.5, $1, $2, $5 thresholds progressively
+    let alerts: string[] = [];
+    for (let i = 0; i < 25; i++) {
+      const result = trackSessionCost(SESSION_ID, 'claude-opus-4-6', 400_000, 200_000, thresholds);
+      if (result) alerts.push(result);
+    }
+    // First alert should mention cost
+    expect(alerts.length).toBeGreaterThanOrEqual(1);
+    expect(alerts[0]).toContain('成本提醒');
+  });
+
+  it('does not re-trigger the same threshold', () => {
+    // Push past $0.5 threshold, then continue — same threshold should not fire again
+    let alertCount = 0;
+    for (let i = 0; i < 30; i++) {
+      const result = trackSessionCost(SESSION_ID, 'claude-sonnet-4-6', 100_000, 50_000, [0.5]);
+      if (result) alertCount++;
+    }
+    // $0.30/M × 100K/round × 30 rounds = 3M tokens = $0.9 — crosses $0.5 once
+    expect(alertCount).toBe(1);
+  });
+
+  it('triggers progressively across multiple thresholds', () => {
+    // claude-opus-4-6 @ $1.50/M, 500K per round
+    // round 21: 10.5M tokens = $15.75 — already past all thresholds
+    // But thresholds fire one-at-a-time due to loop break on first match
+    resetSession(SESSION_ID);
+    let alerts: string[] = [];
+
+    // First 21 rounds: accumulate to trigger
+    for (let i = 0; i < 21; i++) {
+      const result = trackSessionCost(SESSION_ID, 'claude-opus-4-6', 500_000, 200_000, thresholds);
+      if (result) alerts.push(result);
+    }
+    // At round 21: 10.5M input tokens × $1.50/M = $15.75
+    // Should have triggered $0.5 first (at round 21 when rounds > 20)
+    expect(alerts.length).toBeGreaterThanOrEqual(1);
+
+    // Subsequent rounds should trigger remaining thresholds
+    for (let i = 0; i < 10; i++) {
+      const result = trackSessionCost(SESSION_ID, 'claude-opus-4-6', 500_000, 200_000, thresholds);
+      if (result) alerts.push(result);
+    }
+    // All 4 thresholds ($0.5, $1, $2, $5) should have fired
+    expect(alerts.length).toBe(4);
+  });
+
+  it('suggests new session when threshold >= $5', () => {
+    // claude-opus-4-6 @ $1.50/M — accumulate past $5 threshold
+    // Need > 20 rounds, then trigger at round 21
+    for (let i = 0; i < 20; i++) {
+      trackSessionCost(SESSION_ID, 'claude-opus-4-6', 500_000, 200_000, [5]);
+    }
+    // Round 21 (rounds > 20) with 10.5M tokens × $1.50/M = $15.75 → triggers $5
+    const result = trackSessionCost(SESSION_ID, 'claude-opus-4-6', 500_000, 200_000, [5]);
+    expect(result).not.toBeNull();
+    expect(result!).toContain('新开 session');
   });
 });

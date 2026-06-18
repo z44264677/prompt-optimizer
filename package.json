@@ -1,6 +1,6 @@
 {
   "name": "prompt-optimizer-spend-control",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Claude Code plugin: cost estimation + input compression + direct answer for agentic coding tasks. Based on arXiv:2604.22750v2.",
   "main": "dist/index.js",
   "type": "module",
