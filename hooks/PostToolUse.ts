@@ -31,8 +31,6 @@ interface SuppressionStats {
   /** S3: WebSearch chain warnings triggered */
   searchChainWarnings: number;
   searchSearchesPrevented: number; // estimated searches avoided after warning
-  /** S5: cost alerts triggered */
-  costAlerts: number;
 }
 
 interface SessionState {
@@ -44,13 +42,8 @@ interface SessionState {
     firstRound: number;
     triggeredCount: number;
   }>;
-  costTracker: {
-    totalInputTokens: number;
-    totalOutputTokens: number;
-    rounds: number;
-    lastAlertThreshold: number;
-    pricePerM: number;
-  } | null;
+  /** Total tool calls in this session. Used by S4 (verbose detection). */
+  roundCount: number;
   suppressionStats: SuppressionStats;
 }
 
@@ -60,7 +53,7 @@ function loadState(sessionId: string): SessionState {
   try {
     return JSON.parse(readFileSync(path, 'utf-8'));
   } catch {
-    return { searchHistory: [], costTracker: null, suppressionStats: { bashTruncations: 0, bashCharsBefore: 0, bashCharsAfter: 0, readReminders: 0, searchChainWarnings: 0, searchSearchesPrevented: 0, costAlerts: 0 } };
+    return { searchHistory: [], roundCount: 0, suppressionStats: { bashTruncations: 0, bashCharsBefore: 0, bashCharsAfter: 0, readReminders: 0, searchChainWarnings: 0, searchSearchesPrevented: 0 } };
   }
 }
 
@@ -87,7 +80,7 @@ function truncateBashOutput(
   const tail = content.slice(-config.tailChars);
   const dropped = content.length - config.headChars - config.tailChars;
 
-  return `${head}\n\n... [截断 ${dropped.toLocaleString()} 字符] ...\n\n${tail}`;
+  return `${head}\n\n[... ${dropped.toLocaleString()} chars truncated ...]\n\n${tail}`;
 }
 
 // === S2: Read Offset/Limit Reminder ===
@@ -105,10 +98,7 @@ function generateReadReminder(
   const lines = content.split('\n').length;
   const sizeKB = Math.round(content.length / 1024);
 
-  return [
-    `\n[提示] 文件 "${filePath}" 较大 (${sizeKB}KB, ~${lines} 行)。`,
-    '后续读取建议使用 offset/limit 参数，只读取需要的部分。',
-  ].join(' ');
+  return `[Read: ${sizeKB}KB, ~${lines} lines. Use offset/limit for partial reads.]`;
 }
 
 // === S3: WebSearch Chain Detection ===
@@ -189,8 +179,6 @@ function checkSearchChain(
     if (summary) {
       matchedEntry.findings.push(summary);
     }
-    // Save state for existing entries too (so count persists across hook invocations)
-    saveState(sessionId, state);
   } else {
     const summary = extractSearchSummary(content, 3);
     history.push({
@@ -201,20 +189,15 @@ function checkSearchChain(
       firstRound: 0,
       triggeredCount: 0,
     });
-    saveState(sessionId, state);
     return null;
   }
 
   // Trigger chain warning at threshold
   if (matchedEntry.count >= config.chainThreshold) {
-    const allFindings = matchedEntry.findings.slice(-5).join('\n');
     const totalSearches = matchedEntry.count + (matchedEntry.triggeredCount || 0);
-    const warning = [
-      `\n[搜索链检测] 你已就 "${matchedEntry.topic}" 搜索了 ${totalSearches} 次。`,
-      '主要发现：',
-      allFindings || '(无有效结果)',
-      '建议：直接 Read 相关文件获取精确信息，而非继续搜索。',
-    ].join('\n');
+    const warning =
+      `[Search chain: "${matchedEntry.topic}" searched ${totalSearches}x. ` +
+      'Prefer Read/grep over repeated searches.]';
 
     // Track trigger history, then reset count to avoid repeated warnings
     matchedEntry.triggeredCount = totalSearches;
@@ -257,6 +240,9 @@ export function onPostToolUse(ctx: PostToolUseContext, config: SuppressorConfig)
   const state = loadState(ctx.sessionId);
   const ss = state.suppressionStats;
 
+  // Increment round counter (used by S4 verbose detection)
+  state.roundCount++;
+
   // === S1: Bash truncation ===
   if (config.bash.enabled && ctx.toolName === 'Bash' && !ctx.isError) {
     const truncated = truncateBashOutput(ctx.toolResult, config.bash);
@@ -265,7 +251,6 @@ export function onPostToolUse(ctx: PostToolUseContext, config: SuppressorConfig)
       ss.bashTruncations++;
       ss.bashCharsBefore += ctx.toolResult.length;
       ss.bashCharsAfter += truncated.length;
-      saveState(ctx.sessionId, state);
     }
   }
 
@@ -276,7 +261,6 @@ export function onPostToolUse(ctx: PostToolUseContext, config: SuppressorConfig)
     if (reminder) {
       injections.push(reminder);
       ss.readReminders++;
-      saveState(ctx.sessionId, state);
     }
   }
 
@@ -288,11 +272,12 @@ export function onPostToolUse(ctx: PostToolUseContext, config: SuppressorConfig)
     if (chainWarning) {
       injections.push(chainWarning);
       ss.searchChainWarnings++;
-      // Estimate prevented searches: after warning, user typically stops that topic (saves ~3 searches = ~15K tokens)
       ss.searchSearchesPrevented += 3;
-      saveState(ctx.sessionId, state);
     }
   }
+
+  // Persist state once after all strategies have run
+  saveState(ctx.sessionId, state);
 
   if (injections.length > 0) {
     result.injection = injections.join('\n\n');
@@ -321,63 +306,7 @@ export function initSession(sessionId: string): void {
   // Create fresh state
   saveState(sessionId, {
     searchHistory: [],
-    costTracker: null,
-    suppressionStats: { bashTruncations: 0, bashCharsBefore: 0, bashCharsAfter: 0, readReminders: 0, searchChainWarnings: 0, searchSearchesPrevented: 0, costAlerts: 0 },
+    roundCount: 0,
+    suppressionStats: { bashTruncations: 0, bashCharsBefore: 0, bashCharsAfter: 0, readReminders: 0, searchChainWarnings: 0, searchSearchesPrevented: 0 },
   });
-}
-
-// === S5: Session Cost Tracker (file-persisted) ===
-
-const MODEL_PRICES: Record<string, number> = {
-  'claude-opus-4-6': 1.50, 'claude-sonnet-4-6': 0.30,
-  'deepseek-v4-pro': 0.14, 'MiniMax-M3': 2.0, 'MiniMax-M2.7': 2.0,
-  'kimi-k2.6': 2.0, 'doubao-seed-2.0-code': 1.0, 'glm-5.1': 1.0,
-};
-
-export function trackSessionCost(
-  sessionId: string,
-  model: string,
-  inputTokens: number,
-  outputTokens: number,
-  thresholdsUsd: number[],
-): string | null {
-  const state = loadState(sessionId);
-  let t = state.costTracker;
-  if (!t) {
-    const pricePerM = MODEL_PRICES[model] || null;
-    if (!pricePerM) {
-      // Unknown model — track tokens but skip cost alerts to avoid false positives
-      t = { totalInputTokens: 0, totalOutputTokens: 0, rounds: 0, lastAlertThreshold: 0, pricePerM: 0 };
-      state.costTracker = t;
-      t.totalInputTokens += inputTokens;
-      t.totalOutputTokens += outputTokens;
-      t.rounds++;
-      saveState(sessionId, state);
-      return null;
-    }
-    t = {
-      totalInputTokens: 0, totalOutputTokens: 0,
-      rounds: 0, lastAlertThreshold: 0,
-      pricePerM,
-    };
-    state.costTracker = t;
-  }
-  t.totalInputTokens += inputTokens;
-  t.totalOutputTokens += outputTokens;
-  t.rounds++;
-  saveState(sessionId, state);
-
-  if (t.pricePerM === 0) return null;
-
-  const estimatedCost = (t.totalInputTokens * t.pricePerM) / 1_000_000;
-  for (const threshold of thresholdsUsd) {
-    if (estimatedCost >= threshold && t.lastAlertThreshold < threshold && t.rounds > 20) {
-      t.lastAlertThreshold = threshold;
-      state.suppressionStats.costAlerts++;
-      saveState(sessionId, state);
-      return `[成本提醒] 已 ${t.rounds} 轮, 估算 ~$${estimatedCost.toFixed(2)}。` +
-        (threshold >= 5 ? ' 任务完成后建议新开 session。' : '');
-    }
-  }
-  return null;
 }
