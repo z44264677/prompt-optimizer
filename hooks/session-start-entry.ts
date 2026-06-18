@@ -4,12 +4,12 @@
  * Claude Code calls this script at the start of each session.
  * Initializes fresh session state for tracking.
  *
+ * Uses dynamic import() for CJS/ESM compatibility.
+ *
  * Protocol:
  *   stdin:  { session_id: string }
  *   stdout: {} (no action needed)
  */
-
-import { initSession } from './PostToolUse.js';
 
 async function main(): Promise<void> {
   const chunks: Buffer[] = [];
@@ -21,6 +21,9 @@ async function main(): Promise<void> {
   try {
     const input = JSON.parse(raw);
     const sessionId = input.session_id || 'default';
+
+    // Dynamic import for CJS/ESM compatibility
+    const { initSession } = await import('./PostToolUse.js');
     initSession(sessionId);
   } catch {
     // Ignore parse errors
